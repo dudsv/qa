@@ -11,12 +11,14 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from docx.shared import RGBColor
 import openpyxl
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+import re
 
 # Função para buscar URLs a partir do sitemap
 def fetch_urls_from_sitemap(sitemap_url):
     """Fetch URLs from a sitemap."""
     try:
-        response = requests.get(sitemap_url)
+        response = requests.get(sitemap_url, verify=False)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'xml')
         urls = [loc.text for loc in soup.find_all('loc')]
@@ -25,62 +27,108 @@ def fetch_urls_from_sitemap(sitemap_url):
         messagebox.showerror("Erro", f"Erro ao processar o sitemap: {e}")
         return []
 
-# Função para salvar conteúdo da URL em um documento .docx
+import os
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+import docx
+import pandas as pd
+
 def save_content_to_doc(url, folder):
-    """Fetch content from a URL and save to a Word document."""
+    """Fetch content from a URL and save to a Word document with enhanced formatting."""
     try:
-        
-        response = requests.get(url, verify=False)
+        response = requests.get(url, verify=False)  # SSL verification disabled
         response.raise_for_status()
+
+        # Generate filename based on the URL
         parsed_url = urlparse(url)
         filename = parsed_url.netloc.replace('.', '_') + parsed_url.path.replace('/', '_')
         if not filename.strip('_'):
             filename = "index"
         filename += ".docx"
 
+        # Parse HTML content
         soup = BeautifulSoup(response.text, 'html.parser')
         doc = docx.Document()
         doc.add_heading(f"Conteúdo de: {url}", level=1)
 
-        # Ignorar elementos como <nav>, <footer>, etc.
+        # Remove unwanted elements (e.g., navigation, footer)
         for element in soup.find_all(['nav', 'footer', 'aside']):
             element.decompose()
 
-        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'ul']):
-            if tag.name.startswith('h'):
+        # Process and format HTML content
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'ul', 'ol']):
+            if tag.name.startswith('h'):  # Headings
                 level = int(tag.name[1])
                 doc.add_heading(tag.get_text(strip=True), level=level)
-            elif tag.name == 'p':
-                para = doc.add_paragraph()
-                for part in tag.contents:
-                    if part.name == 'a':
-                        link_text = part.get_text(strip=True)
-                        link_url = part.get('href', '')
-                        run = para.add_run(link_text)
-                        run.font.underline = True
-                        para.add_run(f" ({link_url})")
-                    else:
-                        para.add_run(part if isinstance(part, str) else part.get_text())
-            elif tag.name == 'ul':
-                for li in tag.find_all('li'):
-                    para = doc.add_paragraph(style='ListBullet')
-                    for part in li.contents:
-                        if part.name == 'a':
-                            link_text = part.get_text(strip=True)
-                            link_url = part.get('href', '')
-                            run = para.add_run(link_text)
-                            run.font.underline = True
-                            para.add_run(f" ({link_url})")
-                        else:
-                            para.add_run(part if isinstance(part, str) else part.get_text())
+            elif tag.name == 'p':  # Paragraphs
+                add_paragraph_with_formatting(doc, tag)
+            elif tag.name in ['ul', 'ol']:  # Lists
+                add_list_with_formatting(doc, tag)
 
+        # Save the document
         file_path = os.path.join(folder, filename)
         doc.save(file_path)
         return file_path
     except Exception as e:
         return str(e)
 
-# Função para salvar conteúdo das URLs em uma planilha Excel
+def add_paragraph_with_formatting(doc, tag):
+    """Add a paragraph to the Word document, preserving bold, italic, and hyperlinks."""
+    para = doc.add_paragraph()
+    for part in tag.contents:
+        if isinstance(part, str):  # Plain text
+            para.add_run(part)
+        elif part.name == 'a':  # Hyperlinks
+            link_text = part.get_text(strip=True)
+            link_url = part.get('href', '')
+            
+            if para.text:  # Check if there is existing text, add a space before the link
+                para.add_run(" ")  # Add a space before the link
+            
+            run = para.add_run(link_text)
+            run.font.underline = True
+            para.add_run(f" ({link_url})")
+            
+            # After the link, we ensure that there is a space before continuing with other content.
+            para.add_run(" ")  # Ensure space after the link text
+        
+        elif part.name in ['strong', 'b']:  # Bold text
+            run = para.add_run(part.get_text(strip=True))
+            run.bold = True
+        elif part.name in ['em', 'i']:  # Italics
+            run = para.add_run(part.get_text(strip=True))
+            run.italic = True
+        else:  # Other tags or plain text
+            para.add_run(part.get_text(strip=True) if part else '')
+
+    # Ensure proper spacing after bold and italicized text
+    para_format = para.paragraph_format
+    para_format.space_after = docx.shared.Pt(6)  # Adjust space after paragraph if needed
+
+def add_list_with_formatting(doc, tag):
+    """Add a list (ordered or unordered) to the Word document."""
+    list_style = 'ListBullet' if tag.name == 'ul' else 'ListNumber'
+    for li in tag.find_all('li'):
+        para = doc.add_paragraph(style=list_style)
+        for part in li.contents:
+            if isinstance(part, str):  # Plain text
+                para.add_run(part)
+            elif part.name == 'a':  # Hyperlinks
+                link_text = part.get_text(strip=True)
+                link_url = part.get('href', '')
+                run = para.add_run(link_text)
+                run.font.underline = True
+                para.add_run(f" ({link_url})")
+            elif part.name in ['strong', 'b']:  # Bold text
+                run = para.add_run(part.get_text(strip=True))
+                run.bold = True
+            elif part.name in ['em', 'i']:  # Italics
+                run = para.add_run(part.get_text(strip=True))
+                run.italic = True
+            else:  # Other tags or plain text
+                para.add_run(part.get_text(strip=True) if part else '')
+
 def save_content_to_excel(urls, folder):
     """Fetch content from URLs and save to an Excel file."""
     data = []
@@ -99,7 +147,6 @@ def save_content_to_excel(urls, folder):
     df.to_excel(file_path, index=False)
     return file_path
 
-# Função para processar URLs e salvar conteúdo
 def process_urls(urls, output_dir, save_as_doc):
     """Process and save content for each URL."""
     if not os.path.exists(output_dir):
@@ -114,6 +161,7 @@ def process_urls(urls, output_dir, save_as_doc):
     else:
         file_path = save_content_to_excel(urls, output_dir)
         print(f"Saved content to Excel: {file_path}")
+
 
 # Função para iniciar o scraper
 def start_scraper():
@@ -158,18 +206,47 @@ def evaluate_doc_against_url():
         # Fetch text from the URL
         response = requests.get(url, verify=False)
         response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')  
-        page_text_lines = [tag.get_text(strip=True) for tag in soup.find_all(['h1', 'h2', 'h3', 'p'])]
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Process page text, including headings, paragraphs, and lists
+        page_text_lines = []
+        # Collect text from headings
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+            page_text_lines.append(tag.get_text(strip=True))
+        # Collect text from paragraphs
+        for tag in soup.find_all('p'):
+            page_text_lines.append(tag.get_text(" ", strip=True))  # Preserve spaces between words
+        # Collect text from lists (unordered and ordered)
+        for tag in soup.find_all(['ul', 'ol']):
+            for li in tag.find_all('li'):
+                page_text_lines.append(li.get_text(" ", strip=True))  # Preserve spaces between list items
+
+        # Now handle <a> tags (links) separately to preserve spacing around them
+        for a_tag in soup.find_all('a'):
+            link_text = a_tag.get_text(strip=True)  # Only collect the text inside the <a> tag
+            page_text_lines.append(link_text)  # Don't include extra spaces for links
+
+        # Now process the content for URLs directly in text
+        url_pattern = r'(https?://[^\s]+)'  # Regex to match URLs
+        for line in doc_text_lines:
+            # Replace URLs with space-preserving versions, keeping them intact
+            line = re.sub(url_pattern, lambda match: match.group(0), line)  # Retain URL exactly as is
+            page_text_lines.append(line)  # Add it to the page text for comparison
 
         # Prepare the comparison results
         results = []
         for doc_line in doc_text_lines:
-            best_match = max(page_text_lines, key=lambda x: SequenceMatcher(None, doc_line, x).ratio())
-            similarity = SequenceMatcher(None, doc_line, best_match).ratio()
+            # Remove extra spaces from both document and page text before comparison
+            doc_line_cleaned = ' '.join(doc_line.split())  # Normalize spaces in doc line
+            best_match = max(page_text_lines, key=lambda x: SequenceMatcher(None, doc_line_cleaned, x).ratio())
+            best_match_cleaned = ' '.join(best_match.split())  # Normalize spaces in page line
+
+            # Calculate similarity
+            similarity = SequenceMatcher(None, doc_line_cleaned, best_match_cleaned).ratio()
 
             if similarity == 1.0:
                 status = "Presente"
-            elif similarity >= 0.5:
+            elif similarity >= 0.4:
                 status = "Semelhante"
             else:
                 status = "Ausente"
@@ -214,7 +291,6 @@ def evaluate_doc_against_url():
         messagebox.showinfo("Concluído", f"Avaliação concluída! Arquivo salvo em:\n{output_file}")
     except Exception as e:
         messagebox.showerror("Erro", f"Erro ao avaliar o conteúdo: {e}")
-
 # Configuração da UI
 root = Tk()
 root.title("Web Scraper e Avaliador")
