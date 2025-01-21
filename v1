@@ -9,11 +9,7 @@ import pandas as pd
 from difflib import SequenceMatcher
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
-from docx.shared import RGBColor
-import openpyxl
-import difflib
 
-# Função para buscar URLs a partir do sitemap
 def fetch_urls_from_sitemap(sitemap_url):
     """Fetch URLs from a sitemap."""
     try:
@@ -26,93 +22,35 @@ def fetch_urls_from_sitemap(sitemap_url):
         messagebox.showerror("Erro", f"Erro ao processar o sitemap: {e}")
         return []
 
-# Função para salvar conteúdo da URL em um documento .docx
-# Função para avaliar se o conteúdo de um .docx está presente em uma URL
-def evaluate_doc_against_url():
-    """Evaluate if the content of a .docx is fully present in a URL."""
-    doc_path = filedialog.askopenfilename(title="Selecione o arquivo .docx", filetypes=[("Documentos Word", "*.docx")])
-    if not doc_path:
-        return
-
-    url = url_entry.get("1.0", "end").strip()
-    if not url:
-        messagebox.showwarning("Aviso", "Por favor, insira uma URL para avaliação.")
-        return
-
+def save_content_to_doc(url, folder):
+    """Fetch content from a URL and save to a Word document."""
     try:
-        # Extract text from the .docx file
-        doc = docx.Document(doc_path)
-        doc_text_lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-
-        # Fetch text from the URL
         response = requests.get(url)
         response.raise_for_status()
+        parsed_url = urlparse(url)
+        filename = parsed_url.netloc.replace('.', '_') + parsed_url.path.replace('/', '_')
+        if not filename.strip('_'):
+            filename = "index"
+        filename += ".docx"
+
         soup = BeautifulSoup(response.text, 'html.parser')
-        page_text_lines = [tag.get_text(strip=True) for tag in soup.find_all(['h1', 'h2', 'h3', 'p'])]
+        doc = docx.Document()
+        doc.add_heading(f"Conteúdo de: {url}", level=1)
 
-        # Prepare the comparison results
-        results = []
-        for doc_line in doc_text_lines:
-            best_match = max(page_text_lines, key=lambda x: SequenceMatcher(None, doc_line, x).ratio())
-            similarity = SequenceMatcher(None, doc_line, best_match).ratio()
+        # Organize content by headings and paragraphs
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p']):
+            if tag.name.startswith('h'):
+                level = int(tag.name[1])
+                doc.add_heading(tag.get_text(strip=True), level=level)
+            elif tag.name == 'p':
+                doc.add_paragraph(tag.get_text(strip=True))
 
-            if similarity == 1.0:
-                status = "Presente"
-            elif similarity >= 0.5:
-                status = "Semelhante"
-            else:
-                status = "Ausente"
-
-            # Find differences using difflib
-            diff = list(SequenceMatcher(None, doc_line, best_match).get_opcodes())
-            diff_output = ""
-            for tag, i1, i2, j1, j2 in diff:
-                if tag == 'replace' or tag == 'delete':
-                    diff_output += f"Discrepância: {doc_line[i1:i2]} → {best_match[j1:j2]}\n"
-
-            results.append({
-                "Texto do Doc": doc_line,
-                "Texto da Página": best_match if similarity > 0 else "N/A",
-                "Status": status,
-                "Discrepâncias": diff_output if diff_output else "Nenhuma"
-            })
-
-        # Seleção da pasta de saída
-        output_file = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel Files", "*.xlsx")], title="Salvar Resultado de Avaliação")
-        if not output_file:
-            return
-
-        # Save the results to an Excel file
-        df = pd.DataFrame(results)
-        df.to_excel(output_file, index=False)
-
-        # Load the Excel file for styling
-        wb = load_workbook(output_file)
-        ws = wb.active
-
-        # Define color fills
-        green_fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
-        yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-        red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
-
-        # Apply colors to the "Status" column based on the value
-        for row in range(2, len(results) + 2):  # Starting from row 2 to avoid the header
-            status_cell = ws.cell(row=row, column=3)
-            if status_cell.value == "Presente":
-                status_cell.fill = green_fill
-            elif status_cell.value == "Semelhante":
-                status_cell.fill = yellow_fill
-            elif status_cell.value == "Ausente":
-                status_cell.fill = red_fill
-
-        # Save the styled Excel file
-        wb.save(output_file)
-
-        messagebox.showinfo("Concluído", f"Avaliação concluída! Arquivo salvo em:\n{output_file}")
+        file_path = os.path.join(folder, filename)
+        doc.save(file_path)
+        return file_path
     except Exception as e:
-        messagebox.showerror("Erro", f"Erro ao avaliar o conteúdo: {e}")
+        return str(e)
 
-# Função para salvar conteúdo das URLs em uma planilha Excel
 def save_content_to_excel(urls, folder):
     """Fetch content from URLs and save to an Excel file."""
     data = []
@@ -131,7 +69,6 @@ def save_content_to_excel(urls, folder):
     df.to_excel(file_path, index=False)
     return file_path
 
-# Função para processar URLs e salvar conteúdo
 def process_urls(urls, output_dir, save_as_doc):
     """Process and save content for each URL."""
     if not os.path.exists(output_dir):
@@ -147,7 +84,6 @@ def process_urls(urls, output_dir, save_as_doc):
         file_path = save_content_to_excel(urls, output_dir)
         print(f"Saved content to Excel: {file_path}")
 
-# Função para iniciar o scraper
 def start_scraper():
     """Start the scraper with input URLs or sitemap."""
     input_text = url_input.get("1.0", "end").strip()
@@ -170,7 +106,6 @@ def start_scraper():
     process_urls(urls, output_dir, save_as_doc)
     messagebox.showinfo("Concluído", f"Conteúdo salvo na pasta: {output_dir}")
 
-# Função para avaliar se o conteúdo de um .docx está presente em uma URL
 def evaluate_doc_against_url():
     """Evaluate if the content of a .docx is fully present in a URL."""
     doc_path = filedialog.askopenfilename(title="Selecione o arquivo .docx", filetypes=[("Documentos Word", "*.docx")])
@@ -180,6 +115,12 @@ def evaluate_doc_against_url():
     url = url_entry.get("1.0", "end").strip()
     if not url:
         messagebox.showwarning("Aviso", "Por favor, insira uma URL para avaliação.")
+        return
+
+    # Select output folder
+    output_folder = filedialog.askdirectory(title="Selecione a pasta para salvar o resultado")
+    if not output_folder:
+        messagebox.showwarning("Aviso", "Por favor, selecione uma pasta para salvar o arquivo.")
         return
 
     try:
@@ -201,7 +142,7 @@ def evaluate_doc_against_url():
 
             if similarity == 1.0:
                 status = "Presente"
-            elif similarity >= 0.5:
+            elif similarity >= 0.7:
                 status = "Semelhante"
             else:
                 status = "Ausente"
@@ -212,12 +153,8 @@ def evaluate_doc_against_url():
                 "Status": status
             })
 
-        # Seleção da pasta de saída
-        output_file = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel Files", "*.xlsx")], title="Salvar Resultado de Avaliação")
-        if not output_file:
-            return
-
-        # Save the results to an Excel file
+        # Save the results to an Excel file in the selected folder
+        output_file = os.path.join(output_folder, "resultado_avaliacao.xlsx")
         df = pd.DataFrame(results)
         df.to_excel(output_file, index=False)
 
@@ -247,6 +184,7 @@ def evaluate_doc_against_url():
     except Exception as e:
         messagebox.showerror("Erro", f"Erro ao avaliar o conteúdo: {e}")
 
+
 # Configuração da UI
 root = Tk()
 root.title("Web Scraper e Avaliador")
@@ -262,15 +200,14 @@ notebook.add(scraper_tab, text="Web Scraper")
 Label(scraper_tab, text="Insira URLs (uma por linha) ou o URL de um sitemap:").pack(pady=10)
 url_input = Text(scraper_tab, height=15, width=70)
 url_input.pack(pady=10)
-Button(scraper_tab, text="Iniciar Scraper", command=start_scraper, bg="purple", fg="white").pack(pady=10)
+Button(scraper_tab, text="Iniciar Scraper", command=start_scraper, bg="blue", fg="white").pack(pady=10)
 
-# Aba 2: Avaliador de Conteúdo
 evaluator_frame = Frame(notebook)
 notebook.add(evaluator_frame, text="Avaliador de Conteúdo")
 
 Label(evaluator_frame, text="Insira a URL para avaliação:").pack(pady=10)
-url_entry = Text(evaluator_frame, height=1, width=70)
+url_entry = Text(evaluator_frame, width=70, height=1)
 url_entry.pack(pady=10)
-Button(evaluator_frame, text="Iniciar Avaliação", command=evaluate_doc_against_url, bg="purple", fg="white").pack(pady=10)
+Button(evaluator_frame, text="Selecionar e Avaliar .docx", command=evaluate_doc_against_url, bg="green", fg="white").pack(pady=10)
 
 root.mainloop()
