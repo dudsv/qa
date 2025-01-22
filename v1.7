@@ -201,6 +201,29 @@ def evaluate_doc_against_url():
     import requests
     from bs4 import BeautifulSoup
     import pandas as pd
+    from openpyxl import load_workbook
+    from openpyxl.styles import PatternFill
+
+    def clean_text(text):
+        """Remove URLs and clean up text for comparison."""
+        # Remove URLs in various formats
+        # 1. URLs in parentheses with space before/after
+        text = re.sub(r'\s*\([^()]*?(?:http|www)[^()]*?\)\s*', ' ', text)
+        # 2. URLs in parentheses without space
+        text = re.sub(r'\([^()]*?(?:http|www)[^()]*?\)', '', text)
+        # 3. Standalone URLs
+        text = re.sub(r'(?:http|www)[^\s\(\)]+', '', text)
+        # 4. URLs with surrounding text in parentheses
+        text = re.sub(r'\([^()]*(?:http|www)[^()]*\)', '', text)
+        # 5. Remove multiple spaces and normalize
+        text = re.sub(r'\s+', ' ', text)
+        # 6. Remove empty parentheses that might remain
+        text = re.sub(r'\(\s*\)', '', text)
+        # 7. Clean up any remaining artifacts
+        text = re.sub(r'\s+', ' ', text)
+        # 8. Remove spaces before punctuation
+        text = re.sub(r'\s+([.,!?:])', r'\1', text)
+        return text.strip()
 
     # Select the Word document
     doc_path = filedialog.askopenfilename(title="Selecione o arquivo .docx", filetypes=[("Documentos Word", "*.docx")])
@@ -216,7 +239,10 @@ def evaluate_doc_against_url():
     try:
         # Extract text from the .docx file
         doc = docx.Document(doc_path)
-        doc_text_lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        # Clean and store original text for display
+        doc_text_lines_original = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        # Clean text for comparison
+        doc_text_lines = [clean_text(p.text.strip()) for p in doc.paragraphs if p.text.strip()]
 
         # Fetch text from the URL
         response = requests.get(url, verify=False)
@@ -225,30 +251,60 @@ def evaluate_doc_against_url():
 
         # Process page text, including headings, paragraphs, and lists
         page_text_lines = []
-        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p']):
-            page_text_lines.append(tag.get_text(" ", strip=True))  # Preserve spaces between words
-        for tag in soup.find_all(['ul', 'ol']):
-            for li in tag.find_all('li'):
-                page_text_lines.append(li.get_text(" ", strip=True))  # Preserve spaces between list items
+        
+        def process_text_block(element):
+            """Process text content while preserving spaces between formatted elements."""
+            text_parts = []
+            previous_was_text = False
+            
+            for content in element.contents:
+                current_text = ""
+                
+                if isinstance(content, str):
+                    current_text = content
+                    previous_was_text = True
+                elif content.name in ['strong', 'b', 'em', 'i', 'a', 'span']:  # Added span
+                    current_text = content.get_text()
+                    if text_parts and previous_was_text and not text_parts[-1].endswith(' ') and not current_text.startswith(' '):
+                        current_text = ' ' + current_text
+                    previous_was_text = True
+                
+                if current_text:
+                    text_parts.append(current_text)
+                    
+            return ''.join(text_parts).strip()
 
-        # Process <a> tags separately to preserve link text without extra spaces
-        for a_tag in soup.find_all('a'):
-            link_text = a_tag.get_text(strip=True)
-            page_text_lines.append(link_text)
+        # Primeiro, encontre todas as tags de texto relevantes
+        text_elements = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'div'])
+        
+        # Processo cada elemento encontrado
+        for element in text_elements:
+            # Ignore divs que são containers ou têm classes específicas de navegação/rodapé
+            if element.name == 'div':
+                classes = element.get('class', [])
+                if any(c in ' '.join(classes).lower() for c in ['nav', 'footer', 'header', 'menu']):
+                    continue
+                
+                # Para divs, só processe se tiver texto direto (não apenas texto de children)
+                if not element.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li']):
+                    processed_text = process_text_block(element)
+                    if processed_text:
+                        page_text_lines.append(processed_text)
+            else:
+                # Para outros elementos, processe normalmente
+                processed_text = process_text_block(element)
+                if processed_text:
+                    page_text_lines.append(processed_text)
 
-        # Remove formatting tags and handle <strong> or <b> without adding extra spaces
-        for strong_tag in soup.find_all(['strong', 'b']):
-            strong_text = strong_tag.get_text(strip=True)
-            page_text_lines.append(strong_text)
+        # Clean page text for comparison
+        page_text_lines = [clean_text(line) for line in page_text_lines if line.strip()]
 
-        # Normalize spaces and prepare comparison
-        # Ensure that spaces between words are maintained but multiple spaces are removed
-        page_text_lines = [' '.join(line.split()) for line in page_text_lines]
-        doc_text_lines = [' '.join(line.split()) for line in doc_text_lines]
+        # Remove duplicates mantendo a ordem
+        page_text_lines = list(dict.fromkeys(page_text_lines))
 
         # Prepare the comparison results
         results = []
-        for doc_line in doc_text_lines:
+        for i, doc_line in enumerate(doc_text_lines):
             # Find the best match between document text and page text
             best_match = max(page_text_lines, key=lambda x: SequenceMatcher(None, doc_line, x).ratio())
             similarity = SequenceMatcher(None, doc_line, best_match).ratio()
@@ -261,9 +317,10 @@ def evaluate_doc_against_url():
                 status = "Ausente"
 
             results.append({
-                "Texto do Doc": doc_line,
+                "Texto do Doc": doc_text_lines_original[i],  # Use original text for display
                 "Texto da Página": best_match if similarity > 0 else "N/A",
-                "Status": status
+                "Status": status,
+                "Similaridade": f"{similarity:.2%}"  # Adicionado percentual de similaridade
             })
 
         # Convert results to a DataFrame
@@ -275,15 +332,49 @@ def evaluate_doc_against_url():
             filetypes=[("Planilhas Excel", "*.xlsx")]
         )
         if save_path:
+            # First save with pandas
             df.to_excel(save_path, index=False)
+
+            # Then load for styling
+            wb = load_workbook(save_path)
+            ws = wb.active
+
+            # Define color fills
+            green_fill = PatternFill(start_color="92D050", end_color="92D050", fill_type="solid")  # Softer green
+            yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")  # Softer yellow
+            red_fill = PatternFill(start_color="FF9999", end_color="FF9999", fill_type="solid")    # Softer red
+
+            # Apply colors to the "Status" column based on the value
+            for row in range(2, len(results) + 2):  # Starting from row 2 to avoid the header
+                status_cell = ws.cell(row=row, column=3)  # Status is in column 3
+                if status_cell.value == "Presente":
+                    status_cell.fill = green_fill
+                elif status_cell.value == "Semelhante":
+                    status_cell.fill = yellow_fill
+                elif status_cell.value == "Ausente":
+                    status_cell.fill = red_fill
+
+            # Auto-adjust column widths
+            for column in ws.columns:
+                max_length = 0
+                column = [cell for cell in column]
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = (max_length + 2)
+                ws.column_dimensions[column[0].column_letter].width = adjusted_width
+
+            # Save the styled Excel file
+            wb.save(save_path)
             messagebox.showinfo("Sucesso", f"Os resultados foram salvos em {save_path}")
 
     except requests.RequestException as e:
         messagebox.showerror("Erro", f"Erro ao acessar a URL: {e}")
     except Exception as e:
         messagebox.showerror("Erro", f"Ocorreu um erro inesperado: {e}")
-
-
 
 # Configuração da UI
 root = Tk()
