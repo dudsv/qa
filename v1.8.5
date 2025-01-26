@@ -1,7 +1,7 @@
 import os
 import requests
-from tkinter import Tk, Text, Button, Label, filedialog, messagebox, Frame
-from tkinter.ttk import Notebook
+from tkinter import Tk, Text, Button, Label, filedialog, messagebox, Frame, StringVar
+from tkinter.ttk import Notebook, Style, Button
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import docx
@@ -23,6 +23,83 @@ def fetch_urls_from_sitemap(sitemap_url):
     except Exception as e:
         messagebox.showerror("Erro", f"Erro ao processar o sitemap: {e}")
         return []
+
+# Função para extrair textos dos accordions
+from bs4 import BeautifulSoup
+
+from bs4 import BeautifulSoup
+
+def extract_accordion_texts(html_content, 
+                            accordion_selectors=None, 
+                            title_selectors=None, 
+                            body_selectors=None, 
+                            strip_html=True, 
+                            log_errors=False):
+    soup = BeautifulSoup(html_content, 'html.parser')
+    accordion_texts = []
+    
+    accordion_selectors = accordion_selectors or [
+        '.paragraph--type--accordion',
+        '[class*="accordion"]',
+        '.paragraph--type--accordion-item',
+        '.accordion-item',
+        '.field--name-field-c-text'
+    ]
+    
+    title_selectors = title_selectors or [
+        'button.accordion-button',
+        'h2 button',
+        'h2[id^="acc-head"]',
+        'button[data-toggle="collapse"]',
+        'button[data-target]',
+        '[aria-controls]',
+        '.accordion-header'
+    ]
+    
+    body_selectors = body_selectors or [
+        '.accordion-collapse .field__item',
+        '.accordion-body',
+        '.field__item .text-formatted',
+        'div[id^="acc-body"]',
+        '.paragraph--type--c-text .field__item'
+    ]
+    
+    for container_selector in accordion_selectors:
+        containers = soup.select(container_selector)
+        
+        for container in containers:
+            # Skip nested accordion items
+            if container.find_parent(container_selector):
+                continue
+            
+            # Find title
+            title = None
+            for title_selector in title_selectors:
+                title_element = container.select_one(title_selector)
+                if title_element:
+                    title = title_element.get_text(strip=True)
+                    break
+            
+            # Find body
+            body = None
+            for body_selector in body_selectors:
+                body_element = container.select_one(body_selector)
+                if body_element:
+                    body = body_element.get_text(strip=True) if strip_html else str(body_element)
+                    break
+            
+            # Log errors for debugging
+            if log_errors and (not title or not body):
+                print(f"Missing {'title' if not title else 'body'} in container: {container}")
+            
+            # Add to result if both title and body are found and not duplicate
+            if title and body and not any(item['title'] == title for item in accordion_texts):
+                accordion_texts.append({
+                    'title': title,
+                    'body': body
+                })
+    
+    return accordion_texts
 
 def save_content_to_doc(url, folder):
     """Fetch content from a URL and save to a Word document with enhanced formatting."""
@@ -183,7 +260,7 @@ def evaluate_doc_against_url():
     def clean_text(text):
         """Remove URLs and clean up text for comparison."""
         # 1. Remove internal links with text in parentheses
-        text = re.sub(r'\s*\([^()]*?/[^()]*?\)\s*', ' ', text)
+        text = re.sub(r'\s*\([^()]*?(?:http|www|/)[^()]*?\)\s*', ' ', text)
         # 2. URLs in parentheses with space before/after
         text = re.sub(r'\s*\([^()]*?(?:http|www|/)[^()]*?\)\s*', ' ', text)
         # 3. URLs in parentheses without space
@@ -191,7 +268,7 @@ def evaluate_doc_against_url():
         # 4. Standalone URLs
         text = re.sub(r'(?:http|www)[^\s\(\)]+', '', text)
         # 5. URLs with surrounding text in parentheses
-        text = re.sub(r'\([^()]*(?:http|www|/)[^()]*\)', '', text)
+        text = re.sub(r'\([^()]*?(?:http|www|/)[^()]*?\)', '', text)
         # 6. Remove multiple spaces and normalize
         text = re.sub(r'\s+', ' ', text)
         # 7. Remove empty parentheses that might remain
@@ -201,7 +278,7 @@ def evaluate_doc_against_url():
         # 9. Remove spaces before punctuation
         text = re.sub(r'\s+([.,!?:])', r'\1', text)
         return text.strip()
-        
+
     def extract_highlighted_words(soup):
         """Extract highlighted words (bold, italic, headings) and hyperlinks from the HTML content, ignoring nav, footer, and menus."""
         highlighted = {
@@ -248,32 +325,23 @@ def evaluate_doc_against_url():
         soup = BeautifulSoup(response.text, 'html.parser')
         # Process page text, including headings, paragraphs, and lists
         page_text_lines = []
-
         def process_text_block(element):
-            """Process text content while preserving spaces between formatted elements."""
+         
+            """Process text content with improved extraction and preservation of context."""
             text_parts = []
-            previous_was_text = False
-
             for content in element.contents:
                 current_text = ""
-
                 if isinstance(content, str):
-                    current_text = content
-                    previous_was_text = True
-                elif content.name in ['strong', 'b', 'em', 'i', 'a', 'span']: # Added span
-                    current_text = content.get_text()
-                    if text_parts and previous_was_text and not text_parts[-1].endswith(' ') and not current_text.startswith(' '):
-                        current_text = ' ' + current_text
-                    previous_was_text = True
-
+                    current_text = content.strip()
+                elif content.name in ['strong', 'b', 'em', 'i', 'a', 'span', 'p', 'ul', 'ol', 'li', 'div']:
+                    current_text = content.get_text(strip=True)
+                
                 if current_text:
                     text_parts.append(current_text)
-
-            return ''.join(text_parts).strip()
-
+            
+            return ' '.join(text_parts).strip()
         # Primeiro, encontre todas as tags de texto relevantes
         text_elements = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'div'])
-
         # Processo cada elemento encontrado
         for element in text_elements:
             # Ignore divs que são containers ou têm classes específicas de navegação/rodapé
@@ -281,7 +349,6 @@ def evaluate_doc_against_url():
                 classes = element.get('class', [])
                 if any(c in ' '.join(classes).lower() for c in ['nav', 'footer', 'header', 'menu']):
                     continue
-
             # Para divs, só processe se tiver texto direto (não apenas texto de children)
             if not element.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li']):
                 processed_text = process_text_block(element)
@@ -292,15 +359,12 @@ def evaluate_doc_against_url():
                 processed_text = process_text_block(element)
                 if processed_text:
                     page_text_lines.append(processed_text)
-
         # Clean page text for comparison
         page_text_lines = [clean_text(line) for line in page_text_lines if line.strip()]
         # Remove duplicates mantendo a ordem
         page_text_lines = list(dict.fromkeys(page_text_lines))
-
         # Extract highlighted words and hyperlinks
         highlighted_words = extract_highlighted_words(soup)
-
         # Prepare the comparison results
         results = []
         for i, doc_line in enumerate(doc_text_lines):
@@ -319,10 +383,8 @@ def evaluate_doc_against_url():
                 "Status": status,
                 "Similaridade": f"{similarity:.2%}" # Adicionado percentual de similaridade
             })
-
         # Convert results to a DataFrame
         df = pd.DataFrame(results)
-
         # Save results to an Excel file
         save_path = filedialog.asksaveasfilename(
             title="Salvar resultados", defaultextension=".xlsx",
@@ -365,16 +427,14 @@ def evaluate_doc_against_url():
                         pass
                 
                 # Adjust column width based on longest word, but cap it
-                adjusted_width = min(max_word_length + 5, 50)  # Limit max width to 50
+                adjusted_width = min(max_word_length + 5, 50) # Limit max width to 50
                 ws.column_dimensions[column_letter].width = adjusted_width
-
             # Create a new sheet for highlighted words
             ws_highlighted = wb.create_sheet(title="Palavras Destacadas")
             ws_highlighted.append(["Tipo", "Palavras"])
             for key, words in highlighted_words.items():
                 for word in words:
                     ws_highlighted.append([key, word])
-
             # Save the styled Excel file
             wb.save(save_path)
             messagebox.showinfo("Sucesso", f"Os resultados foram salvos em {save_path}")
@@ -383,24 +443,137 @@ def evaluate_doc_against_url():
     except Exception as e:
         messagebox.showerror("Erro", f"Ocorreu um erro inesperado: {e}")
 
-# Configuração da UI
+# Updated UI Configuration
+def create_rounded_dark_theme(root):
+    """Create a rounded, dark-themed UI with purple accent."""
+    root.configure(bg='#1E1E2E') # Deep dark background
+    root.option_add('*Background', '#1E1E2E') # Global background
+    root.option_add('*Foreground', '#E0E0E0') # Light text
+    root.option_add('*Font', ('Helvetica', 10)) # Clean, modern font
+    style = Style()
+    style.theme_use('clam') # More customizable theme
+    # Notebook style
+    style.configure('TNotebook', background='#1E1E2E', borderwidth=0)
+    style.configure('TNotebook.Tab', 
+                    background='#2C2C3E', 
+                    foreground='#E0E0E0', 
+                    padding=[10, 5], 
+                    font=('Helvetica', 10, 'bold')
+                   )
+    style.map('TNotebook.Tab', 
+              background=[('selected', '#6A5ACD')], # Selected tab color
+              foreground=[('selected', 'white')]
+             )
+    # Button style
+    style.configure('TButton', 
+                    background='#6A5ACD', # Purple accent
+                    foreground='white',
+                    font=('Helvetica', 10, 'bold'),
+                    borderwidth=0,
+                    relief='flat'
+                   )
+    style.map('TButton', 
+              background=[('active', '#7B68EE')], # Lighter purple on hover
+              foreground=[('active', 'white')]
+             )
+    return style
+
+def start_scraper():
+    """Start the scraper with enhanced error handling and UI feedback."""
+    input_text = url_input.get("1.0", "end").strip()
+    urls = []
+    if input_text.startswith("http") and input_text.endswith(".xml"):
+        urls = fetch_urls_from_sitemap(input_text)
+    else:
+        urls = [line.strip() for line in input_text.splitlines() if line.strip()]
+    
+    if not urls:
+        messagebox.showwarning("Aviso", "Nenhuma URL fornecida ou válida encontrada.")
+        return
+    
+    output_dir = filedialog.askdirectory(title="Selecione o diretório de saída")
+    if not output_dir:
+        return
+    
+    save_as_doc = messagebox.askyesno("Salvar como", "Deseja salvar como documentos Word (.docx)? (Selecionar 'Não' salvará como Excel)")
+    process_urls(urls, output_dir, save_as_doc)
+    messagebox.showinfo("Concluído", f"Conteúdo salvo na pasta: {output_dir}")
+
+# Main Application Setup
 root = Tk()
 root.title("Web Scraper e Avaliador")
-root.geometry("600x500")
-notebook = Notebook(root)
-notebook.pack(fill="both", expand=True)
-# Aba 1: Web Scraper
-scraper_tab = Frame(notebook)
+root.geometry("700x600")
+root.configure(bg='#1E1E2E')
+# Create dark theme
+theme_style = create_rounded_dark_theme(root)
+# Notebook with rounded look
+notebook = Notebook(root, style='TNotebook')
+notebook.pack(fill="both", expand=True, padx=15, pady=15, ipadx=10, ipady=10)
+# Scraper Tab
+scraper_tab = Frame(notebook, bg='#1E1E2E', highlightthickness=2, highlightcolor='#6A5ACD', highlightbackground='#6A5ACD')
 notebook.add(scraper_tab, text="Web Scraper")
-Label(scraper_tab, text="Insira URLs (uma por linha) ou o URL de um sitemap:").pack(pady=10)
-url_input = Text(scraper_tab, height=15, width=70)
+# Custom rounded text widget
+url_input = Text(
+    scraper_tab, 
+    height=15, 
+    width=70, 
+    bg='#2C2C3E', 
+    fg='#E0E0E0', 
+    insertbackground='white',
+    selectbackground='#6A5ACD',
+    relief='flat',
+    borderwidth=10,
+    highlightthickness=2,
+    highlightcolor='#6A5ACD',
+    highlightbackground='#6A5ACD'
+)
 url_input.pack(pady=10)
-Button(scraper_tab, text="Iniciar Scraper", command=start_scraper, bg="purple", fg="white").pack(pady=10)
-# Aba 2: Avaliador de Conteúdo
-evaluator_frame = Frame(notebook)
+Label(
+    scraper_tab, 
+    text="Insira URLs (uma por linha) ou o URL de um sitemap:", 
+    bg='#1E1E2E', 
+    fg='#E0E0E0', 
+    font=('Helvetica', 12)
+).pack(pady=5)
+# Rounded Button
+scraper_button = Button(
+    scraper_tab, 
+    text="Iniciar Scraper", 
+    command=start_scraper,
+    style='Rounded.TButton'
+)
+scraper_button.pack(pady=10)
+# Evaluator Tab
+evaluator_frame = Frame(notebook, bg='#1E1E2E', highlightthickness=2, highlightcolor='#6A5ACD', highlightbackground='#6A5ACD')
 notebook.add(evaluator_frame, text="Avaliador de Conteúdo")
-Label(evaluator_frame, text="Insira a URL para avaliação:").pack(pady=10)
-url_entry = Text(evaluator_frame, height=1, width=70)
+url_entry = Text(
+    evaluator_frame, 
+    height=1, 
+    width=70, 
+    bg='#2C2C3E', 
+    fg='#E0E0E0', 
+    insertbackground='white',
+    selectbackground='#6A5ACD',
+    relief='flat',
+    borderwidth=10,
+    highlightthickness=2,
+    highlightcolor='#6A5ACD',
+    highlightbackground='#6A5ACD'
+)
 url_entry.pack(pady=10)
-Button(evaluator_frame, text="Iniciar Avaliação", command=evaluate_doc_against_url, bg="purple", fg="white").pack(pady=10)
+Label(
+    evaluator_frame, 
+    text="Insira a URL para avaliação:", 
+    bg='#1E1E2E', 
+    fg='#E0E0E0', 
+    font=('Helvetica', 12)
+).pack(pady=5)
+# Rounded Button
+eval_button = Button(
+    evaluator_frame, 
+    text="Iniciar Avaliação", 
+    command=evaluate_doc_against_url,
+    style='Rounded.TButton'
+)
+eval_button.pack(pady=10)
 root.mainloop()
