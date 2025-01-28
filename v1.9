@@ -308,45 +308,69 @@ def evaluate_doc_against_url():
 
 from tkinter import *
 from tkinter.ttk import *
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, Frame as TkFrame
 
 def create_rounded_dark_theme(root):
     root.configure(bg='#1E1E2E')
     style = Style()
     style.theme_use('clam')
     
-    # Notebook styling
-    style.configure('TNotebook', 
-                    background='#1E1E2E', 
-                    borderwidth=0)
+    style.configure('TNotebook', background='#1E1E2E')
     style.configure('TNotebook.Tab', 
                    background='#2C2C3E',
-                   foreground='#6A5ACD',
-                   padding=[10, 5],
-                   borderwidth=0)
+                   foreground='#E0E0E0',
+                   padding=[10, 5])
+    
     style.map('TNotebook.Tab',
               background=[('selected', '#6A5ACD')],
               foreground=[('selected', 'white')])
     
-    # Button styling
     style.configure('TButton',
                    padding=[10, 5],
-                   background='#6A5ACD',
-                   foreground='white',
-                   borderwidth=0,
-                   focusthickness=0,
-                   focuscolor='none')
-    style.map('TButton',
-              background=[('active', '#7B68EE')])
+                   borderwidth=0)
     
-    # Frame styling
+    # Add Frame styling
     style.configure('Custom.TFrame', background='#1E1E2E')
     
     return style
 
 def start_scraper():
-    # Existing start_scraper implementation
-    pass
+    input_text = url_input.get("1.0", "end").strip()
+    urls = []
+    
+    if input_text.startswith("http") and input_text.endswith(".xml"):
+        urls = fetch_urls_from_sitemap(input_text)
+    else:
+        urls = [line.strip() for line in input_text.splitlines() if line.strip()]
+    
+    if not urls:
+        messagebox.showwarning("Warning", "No valid URLs found.")
+        return
+    
+    output_dir = filedialog.askdirectory(title="Select output directory")
+    if not output_dir:
+        return
+    
+    save_as_doc = messagebox.askyesno("Format", "Save as Word documents? (No = Excel)")
+    
+    try:
+        root.config(cursor="watch")
+        root.update()
+        
+        if save_as_doc:
+            for url in urls:
+                status = save_content_to_doc(url,output_dir)
+                print(f"Processed {url}: {status}")
+        else:
+            file_path = save_content_to_excel(urls, output_dir)
+            print(f"Saved content to Excel: {file_path}")
+            
+        messagebox.showinfo("Success", f"Files saved in: {output_dir}")
+    except Exception as e:
+        messagebox.showerror("Error", f"An error occurred: {str(e)}")
+    finally:
+        root.config(cursor="")
+        root.update()
 
 if __name__ == "__main__":
     root = Tk()
@@ -357,7 +381,7 @@ if __name__ == "__main__":
     notebook = Notebook(root, style='TNotebook')
     notebook.pack(fill="both", expand=True, padx=15, pady=15)
 
-    # Scraper Tab
+    # Scraper Tab - Using ttk.Frame with style
     scraper_tab = Frame(notebook, style='Custom.TFrame')
     notebook.add(scraper_tab, text="Web Scraper")
 
@@ -372,10 +396,10 @@ if __name__ == "__main__":
         height=15,
         width=80,
         bg='#2C2C3E',
-        fg='white',  # Changed text color to white for better visibility
+        fg='#6A5ACD',
         insertbackground='white',
         relief='flat',
-        borderwidth=0,
+        borderwidth=10,
         highlightthickness=2,
         highlightcolor='#6A5ACD',
         highlightbackground='#6A5ACD'
@@ -403,10 +427,10 @@ if __name__ == "__main__":
         height=1,
         width=80,
         bg='#2C2C3E',
-        fg='white',
+        fg='#6A5ACD',
         insertbackground='white',
         relief='flat',
-        borderwidth=0,
+        borderwidth=10,
         highlightthickness=2,
         highlightcolor='#6A5ACD',
         highlightbackground='#6A5ACD'
@@ -416,16 +440,16 @@ if __name__ == "__main__":
     Button(
         evaluator_frame,
         text="Analyze Content",
-        command=lambda: None  # Replace with actual command
+        command=evaluate_doc_against_url
     ).pack(pady=10)
 
-    # Status Bar
+    # Status Bar using tk.Label for bg support
     status_bar = Label(
         root,
         text="Ready",
         background='#1E1E2E',
         foreground='#6A5ACD',
-        relief='flat',  # Removed sunken effect
+        relief='sunken',
         anchor='w'
     )
     status_bar.pack(side='bottom', fill='x')
