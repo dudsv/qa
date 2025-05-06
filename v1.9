@@ -1,39 +1,28 @@
+
 import os
 import requests
-from tkinter import Tk, Text, Button, Label, filedialog, messagebox, Frame, StringVar
+from tkinter import Tk, Text, Button, Label, filedialog, messagebox, Frame
 from tkinter.ttk import Notebook, Style
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import docx
 import pandas as pd
-from difflib import SequenceMatcher
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Alignment
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import re
 
-# ======================== Text Processing ========================
 def clean_text(text):
-    """Clean text by removing URLs, normalizing spaces, and fixing punctuation."""
     if not isinstance(text, str):
         return ""
-        
-    # Remove URLs and parenthetical content with URLs
     url_pattern = r'\s*(?:\([^()]*?(?:https?://|www\.)[^()]*?\)|(?:https?://|www\.)[^\s()]+)\s*'
     cleaned = re.sub(url_pattern, ' ', text)
-    
-    # Remove empty parentheses
     cleaned = re.sub(r'\(\s*\)', '', cleaned)
-    
-    # Fix spacing and punctuation
     cleaned = re.sub(r'\s+|(\s+)(?=[.,!?:;])', lambda m: '' if m.group(1) else ' ', cleaned)
-    
     return cleaned.strip()
 
-# ======================== Web Scraping ========================
 def fetch_urls_from_sitemap(sitemap_url):
-    """Fetch URLs from a sitemap with error handling."""
     try:
         response = requests.get(sitemap_url, verify=False)
         response.raise_for_status()
@@ -43,133 +32,25 @@ def fetch_urls_from_sitemap(sitemap_url):
         messagebox.showerror("Error", f"Error processing sitemap: {e}")
         return []
 
-def extract_accordion_texts(html_content, accordion_selectors=None, title_selectors=None, 
-                          body_selectors=None, strip_html=True):
-    """Extract text content from accordion elements with enhanced selector support."""
-    soup = BeautifulSoup(html_content, 'html.parser')
-    accordion_texts = []
-    
-    accordion_selectors = accordion_selectors or [
-        '.paragraph--type--accordion',
-        '[class*="accordion"]',
-        '.paragraph--type--accordion-item',
-        '.accordion-item',
-        '.field--name-field-c-text'
-    ]
-    
-    title_selectors = title_selectors or [
-        'button.accordion-button',
-        'h2 button',
-        'h2[id^="acc-head"]',
-        'button[data-toggle="collapse"]',
-        '[aria-controls]',
-        '.accordion-header'
-    ]
-    
-    body_selectors = body_selectors or [
-        '.accordion-collapse .field__item',
-        '.accordion-body',
-        '.field__item .text-formatted',
-        'div[id^="acc-body"]',
-        '.paragraph--type--c-text .field__item'
-    ]
-    
-    for container in soup.select(','.join(accordion_selectors)):
-        if container.find_parent(container_selectors):
-            continue
-            
-        title = next((tag.get_text(strip=True) for selector in title_selectors 
-                     for tag in container.select(selector)), None)
-        body = next((tag.get_text(strip=True) if strip_html else str(tag) 
-                    for selector in body_selectors 
-                    for tag in container.select(selector)), None)
-        
-        if title and body and not any(item['title'] == title for item in accordion_texts):
-            accordion_texts.append({'title': title, 'body': body})
-    
-    return accordion_texts
-
-# ======================== Document Processing ========================
-def add_paragraph_with_formatting(doc, tag):
-    """Add a paragraph to Word document with enhanced formatting preservation."""
-    para = doc.add_paragraph()
-    
-    for i, part in enumerate(tag.contents):
-        if isinstance(part, str):
-            para.add_run(part)
-        elif part.name == 'a':
-            link_text = part.get_text(strip=True)
-            link_url = part.get('href', '')
-            if para.text:
-                para.add_run(" ")
-            run = para.add_run(link_text)
-            run.font.underline = True
-            para.add_run(f" ({link_url})")
-            para.add_run(" ")
-        elif part.name in ['strong', 'b']:
-            run = para.add_run(part.get_text(strip=True))
-            run.bold = True
-        elif part.name in ['em', 'i']:
-            run = para.add_run(part.get_text(strip=True))
-            run.italic = True
-        else:
-            para.add_run(part.get_text(strip=True) if part else '')
-            
-        if i < len(tag.contents) - 1 and not isinstance(part, str) and part.name != 'a':
-            para.add_run(" ")
-    
-    para.paragraph_format.space_after = docx.shared.Pt(6)
-
-def add_list_with_formatting(doc, tag):
-    """Add a formatted list to Word document."""
-    list_style = 'ListBullet' if tag.name == 'ul' else 'ListNumber'
-    for li in tag.find_all('li'):
-        para = doc.add_paragraph(style=list_style)
-        for part in li.contents:
-            if isinstance(part, str):
-                para.add_run(part)
-            elif part.name == 'a':
-                link_text = part.get_text(strip=True)
-                link_url = part.get('href', '')
-                run = para.add_run(link_text)
-                run.font.underline = True
-                para.add_run(f" ({link_url})")
-            elif part.name in ['strong', 'b']:
-                run = para.add_run(part.get_text(strip=True))
-                run.bold = True
-            elif part.name in ['em', 'i']:
-                run = para.add_run(part.get_text(strip=True))
-                run.italic = True
-            else:
-                para.add_run(part.get_text(strip=True) if part else '')
-
 def save_content_to_doc(url, folder):
-    """Save webpage content to Word document with enhanced formatting."""
     try:
         response = requests.get(url, verify=False)
         response.raise_for_status()
-        
         parsed_url = urlparse(url)
         filename = parsed_url.netloc.replace('.', '_') + parsed_url.path.replace('/', '_')
         if not filename.strip('_'):
             filename = "index"
         filename += ".docx"
-        
         soup = BeautifulSoup(response.text, 'html.parser')
         doc = docx.Document()
         doc.add_heading(f"Content from: {url}", level=1)
-        
         for element in soup.find_all(['nav', 'footer', 'aside']):
             element.decompose()
-            
-        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'ul', 'ol']):
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p']):
             if tag.name.startswith('h'):
                 doc.add_heading(tag.get_text(strip=True), level=int(tag.name[1]))
             elif tag.name == 'p':
-                add_paragraph_with_formatting(doc, tag)
-            elif tag.name in ['ul', 'ol']:
-                add_list_with_formatting(doc, tag)
-        
+                doc.add_paragraph(tag.get_text(strip=True))
         file_path = os.path.join(folder, filename)
         doc.save(file_path)
         return file_path
@@ -177,68 +58,47 @@ def save_content_to_doc(url, folder):
         return str(e)
 
 def save_content_to_excel(urls, folder):
-    """Save webpage content to Excel with enhanced error handling."""
     data = []
     for url in urls:
         try:
             response = requests.get(url, verify=False)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
-            text_content = "\n".join([tag.get_text(strip=True) 
-                                    for tag in soup.find_all(['h1', 'h2', 'h3', 'p'])])
+            text_content = "\n".join([tag.get_text(strip=True) for tag in soup.find_all(['h1', 'h2', 'h3', 'p'])])
             data.append({"URL": url, "Content": text_content})
         except Exception as e:
             data.append({"URL": url, "Content": f"Error: {e}"})
-    
     file_path = os.path.join(folder, "content_urls.xlsx")
     df = pd.DataFrame(data)
     df.to_excel(file_path, index=False)
     return file_path
 
-# ======================== Content Evaluation ========================
 def evaluate_doc_against_url():
-    """Evaluate document content against webpage with enhanced similarity detection."""
     try:
         root.config(cursor="watch")
         root.update()
-
-        doc_path = filedialog.askopenfilename(
-            title="Select .docx file", 
-            filetypes=[("Word Documents", "*.docx")]
-        )
+        doc_path = filedialog.askopenfilename(title="Select .docx file", filetypes=[("Word Documents", "*.docx")])
         if not doc_path:
             return
-
         url = url_entry.get("1.0", "end").strip()
         if not url:
             messagebox.showwarning("Warning", "Please enter a URL for evaluation.")
             return
-
-        # Process document
         doc = docx.Document(doc_path)
         doc_text_lines = [clean_text(p.text) for p in doc.paragraphs if p.text.strip()]
-
-        # Process webpage
         response = requests.get(url, verify=False)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'lxml')
-        
-        # Remove navigation elements
         for element in soup.find_all(['nav', 'footer', 'aside', 'header', 'form']):
             element.decompose()
-
-        # Extract and clean webpage text
         main_content = soup.find(['main', 'article']) or soup
         web_text_lines = [
             clean_text(element.get_text(' ', strip=True))
             for element in main_content.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li'])
             if not element.find_parents(['details', '[aria-hidden=true]'])
         ]
-
-        # Calculate similarities using TF-IDF and cosine similarity
         vectorizer = TfidfVectorizer(stop_words='english')
         results = []
-        
         for doc_text in doc_text_lines:
             best_match = ("", 0)
             for web_text in web_text_lines:
@@ -250,121 +110,69 @@ def evaluate_doc_against_url():
                             best_match = (web_text, similarity)
                     except:
                         continue
-
             status = ("Exact" if best_match[1] >= 0.95 else
                      "Similar" if best_match[1] >= 0.75 else
                      "Partial" if best_match[1] >= 0.4 else "Missing")
-
             results.append({
                 "Document Text": doc_text,
                 "Webpage Match": best_match[0],
                 "Status": status,
                 "Similarity": f"{best_match[1]:.1%}"
             })
-
-        # Save results to Excel with formatting
         save_path = filedialog.asksaveasfilename(
-            title="Save Results",
-            defaultextension=".xlsx",
-            filetypes=[("Excel Workbooks", "*.xlsx")]
-        )
-        
+            title="Save Results", defaultextension=".xlsx", filetypes=[("Excel Workbooks", "*.xlsx")])
         if save_path:
             df = pd.DataFrame(results)
             df.to_excel(save_path, index=False)
-            
             wb = load_workbook(save_path)
             ws = wb.active
-            
-            # Apply formatting
             fills = {
                 "Exact": PatternFill(start_color="92D050", fill_type="solid"),
                 "Similar": PatternFill(start_color="FFEB9C", fill_type="solid"),
                 "Partial": PatternFill(start_color="FFC7CE", fill_type="solid"),
                 "Missing": PatternFill(start_color="FF9999", fill_type="solid")
             }
-            
             for row in ws.iter_rows(min_row=2):
                 status = row[2].value
                 if status in fills:
                     row[2].fill = fills[status]
-                
                 for cell in row:
                     cell.alignment = Alignment(wrapText=True, vertical='top')
-            
-            # Adjust column widths
             for column in ws.columns:
                 max_length = max(len(str(cell.value)) for cell in column)
                 ws.column_dimensions[column[0].column_letter].width = min(max_length + 2, 50)
-            
             wb.save(save_path)
             messagebox.showinfo("Success", f"Results saved to: {save_path}")
-
     except Exception as e:
         messagebox.showerror("Error", f"An error occurred: {str(e)}")
     finally:
         root.config(cursor="")
         root.update()
 
-from tkinter import *
-from tkinter.ttk import *
-from tkinter import messagebox, filedialog, Frame as TkFrame
-
-def create_rounded_dark_theme(root):
-    root.configure(bg='#1E1E2E')
-    style = Style()
-    style.theme_use('clam')
-    
-    style.configure('TNotebook', background='#1E1E2E')
-    style.configure('TNotebook.Tab', 
-                   background='#2C2C3E',
-                   foreground='#E0E0E0',
-                   padding=[10, 5])
-    
-    style.map('TNotebook.Tab',
-              background=[('selected', '#6A5ACD')],
-              foreground=[('selected', 'white')])
-    
-    style.configure('TButton',
-                   padding=[10, 5],
-                   borderwidth=0)
-    
-    # Add Frame styling
-    style.configure('Custom.TFrame', background='#1E1E2E')
-    
-    return style
-
 def start_scraper():
     input_text = url_input.get("1.0", "end").strip()
     urls = []
-    
     if input_text.startswith("http") and input_text.endswith(".xml"):
         urls = fetch_urls_from_sitemap(input_text)
     else:
         urls = [line.strip() for line in input_text.splitlines() if line.strip()]
-    
     if not urls:
         messagebox.showwarning("Warning", "No valid URLs found.")
         return
-    
     output_dir = filedialog.askdirectory(title="Select output directory")
     if not output_dir:
         return
-    
     save_as_doc = messagebox.askyesno("Format", "Save as Word documents? (No = Excel)")
-    
     try:
         root.config(cursor="watch")
         root.update()
-        
         if save_as_doc:
             for url in urls:
-                status = save_content_to_doc(url,output_dir)
+                status = save_content_to_doc(url, output_dir)
                 print(f"Processed {url}: {status}")
         else:
             file_path = save_content_to_excel(urls, output_dir)
             print(f"Saved content to Excel: {file_path}")
-            
         messagebox.showinfo("Success", f"Files saved in: {output_dir}")
     except Exception as e:
         messagebox.showerror("Error", f"An error occurred: {str(e)}")
@@ -376,82 +184,30 @@ if __name__ == "__main__":
     root = Tk()
     root.title("Web Scraper and Content Evaluator")
     root.geometry("800x650")
-
-    theme_style = create_rounded_dark_theme(root)
-    notebook = Notebook(root, style='TNotebook')
+    notebook = Notebook(root)
     notebook.pack(fill="both", expand=True, padx=15, pady=15)
 
-    # Scraper Tab - Using ttk.Frame with style
-    scraper_tab = Frame(notebook, style='Custom.TFrame')
+    scraper_tab = Frame(notebook, background='#1E1E2E')
     notebook.add(scraper_tab, text="Web Scraper")
-
-    Label(scraper_tab, 
-          text="Enter URLs (one per line) or sitemap URL:",
-          background='#1E1E2E',
-          foreground='#6A5ACD',
-          font=('Helvetica', 10, 'bold')).pack(pady=5)
-
-    url_input = Text(
-        scraper_tab,
-        height=15,
-        width=80,
-        bg='#2C2C3E',
-        fg='#6A5ACD',
-        insertbackground='white',
-        relief='flat',
-        borderwidth=10,
-        highlightthickness=2,
-        highlightcolor='#6A5ACD',
-        highlightbackground='#6A5ACD'
-    )
+    Label(scraper_tab, text="Enter URLs (one per line) or sitemap URL:",
+          background='#1E1E2E', foreground='#6A5ACD').pack(pady=5)
+    url_input = Text(scraper_tab, height=15, width=80, bg='#2C2C3E', fg='#6A5ACD',
+                     insertbackground='white', relief='flat', borderwidth=10,
+                     highlightthickness=2, highlightcolor='#6A5ACD', highlightbackground='#6A5ACD')
     url_input.pack(pady=10)
+    Button(scraper_tab, text="Start Scraping", command=start_scraper).pack(pady=10)
 
-    Button(
-        scraper_tab,
-        text="Start Scraping",
-        command=start_scraper
-    ).pack(pady=10)
-
-    # Evaluator Tab
-    evaluator_frame = Frame(notebook, style='Custom.TFrame')
+    evaluator_frame = Frame(notebook, background='#1E1E2E')
     notebook.add(evaluator_frame, text="Content Evaluator")
-
-    Label(evaluator_frame, 
-          text="Enter URL for evaluation:",
-          background='#1E1E2E',
-          foreground='#6A5ACD',
-          font=('Helvetica', 10, 'bold')).pack(pady=5)
-
-    url_entry = Text(
-        evaluator_frame,
-        height=1,
-        width=80,
-        bg='#2C2C3E',
-        fg='#6A5ACD',
-        insertbackground='white',
-        relief='flat',
-        borderwidth=10,
-        highlightthickness=2,
-        highlightcolor='#6A5ACD',
-        highlightbackground='#6A5ACD'
-    )
+    Label(evaluator_frame, text="Enter URL for evaluation:",
+          background='#1E1E2E', foreground='#6A5ACD').pack(pady=5)
+    url_entry = Text(evaluator_frame, height=1, width=80, bg='#2C2C3E', fg='#6A5ACD',
+                     insertbackground='white', relief='flat', borderwidth=10,
+                     highlightthickness=2, highlightcolor='#6A5ACD', highlightbackground='#6A5ACD')
     url_entry.pack(pady=10)
+    Button(evaluator_frame, text="Analyze Content", command=evaluate_doc_against_url).pack(pady=10)
 
-    Button(
-        evaluator_frame,
-        text="Analyze Content",
-        command=evaluate_doc_against_url
-    ).pack(pady=10)
-
-    # Status Bar using tk.Label for bg support
-    status_bar = Label(
-        root,
-        text="Ready",
-        background='#1E1E2E',
-        foreground='#6A5ACD',
-        relief='sunken',
-        anchor='w'
-    )
+    status_bar = Label(root, text="Ready", background='#1E1E2E', foreground='#6A5ACD',
+                       relief='sunken', anchor='w')
     status_bar.pack(side='bottom', fill='x')
-
     root.mainloop()
