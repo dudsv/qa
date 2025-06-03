@@ -1,7 +1,6 @@
 import os
 import re
 import pandas as pd
-import requests
 from docx import Document
 from bs4 import BeautifulSoup
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -9,174 +8,405 @@ from sklearn.metrics.pairwise import cosine_similarity
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils.dataframe import dataframe_to_rows
+from tkinter import Tk, filedialog, simpledialog, messagebox, Button, Label
+from tkinter import ttk
+from pathlib import Path
+if getattr(sys, '_MEIPASS', None):
+    embedded_browser_path = os.path.join(
+        sys._MEIPASS,
+        "playwright", "driver", "package", "lib", "server"
+    )
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = embedded_browser_path
+
+from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright
+
+# ---------------------- HELPERS ----------------------
 
 def clean_text(text):
     if not isinstance(text, str):
         return ""
-    text = re.sub(r'\s*(?:\([^()]*?(?:https?://|www\.)[^()]*?\)|(?:https?://|www\.)[^\s()]+)\s*', ' ', text)
+    # Remove links (http, www, etc.) and empty parentheses
+    text = re.sub(
+        r'\s*(?:\([^()]*?(?:https?://|www\.|/)[^()]*?\)|(?:https?://|www\.|/)[^\s()]+)\s*',
+        ' ',
+        text
+    )
     text = re.sub(r'\(\s*\)', '', text)
+    # Collapse extra whitespace, but preserve space before punctuation
     text = re.sub(r'\s+|(\s+)(?=[.,!?:;])', lambda m: '' if m.group(1) else ' ', text)
     return text.strip()
 
-def carregar_texto_docx(path):
+def extract_metadata(soup):
+    return {
+        "Title Tag": soup.title.string.strip() if soup.title else "",
+        "Meta Description": soup.find("meta", {"name": "description"})['content'].strip()
+                             if soup.find("meta", {"name": "description"}) else "",
+        "Open Graph Title": soup.find("meta", {"property": "og:title"})['content'].strip()
+                             if soup.find("meta", {"property": "og:title"}) else "",
+        "Open Graph Description": soup.find("meta", {"property": "og:description"})['content'].strip()
+                                  if soup.find("meta", {"property": "og:description"}) else ""
+    }
+
+def extract_alt_tags(soup):
+    return [img.get("alt", "").strip() for img in soup.find_all("img") if img.get("alt")]
+
+def collect_html_elements(main):
+    footer = main.find('footer')
+    if footer:
+        footer.decompose()
+
+    elements = []
+    # Headings (h1–h6)
+    for i in range(1, 7):
+        for tag in main.find_all(f'h{i}'):
+            text = clean_text(tag.get_text(" ", strip=True))
+            if text:
+                elements.append(['Heading', f'h{i}', text, ''])
+    # Bold text
+    for tag in main.find_all(['strong', 'b']):
+        text = clean_text(tag.get_text(" ", strip=True))
+        if text:
+            elements.append(['Bold', '', text, ''])
+    # Italic text
+    for tag in main.find_all(['em', 'i']):
+        text = clean_text(tag.get_text(" ", strip=True))
+        if text:
+            elements.append(['Italic', '', text, ''])
+    # Ignore <a> tags to avoid collecting anchors
+
+    return pd.DataFrame(elements, columns=['Definition', 'Tag', 'Text', 'Link'])
+
+def load_docx_text(path):
     doc = Document(path)
     return [clean_text(p.text) for p in doc.paragraphs if p.text.strip()]
 
-def carregar_texto_url(url):
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    main = soup.find("main") or soup.find("article") or soup.body
-    for tag in main(['script', 'style', 'nav', 'footer', 'header', 'aside', 'noscript']):
+def load_url_text(url):
+    """
+    - Renders JS via Playwright, waits for network idle
+    - Scrolls to bottom to load dynamic content
+    - Extracts accordion title "Puntuación Veterinaria" via <a class="accordion--text-v2">
+    - Extracts table inside specific div
+    - Collects all useful text blocks, ignoring "Previous Next"
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(url, timeout=60000)
+        page.wait_for_load_state("networkidle")
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(1000)
+        html = page.content()
+        browser.close()
+
+    soup = BeautifulSoup(html, 'html.parser')
+    texts = []
+
+    # 1) Capture accordion titles via <a class="accordion--text-v2">
+    for a_tag in soup.find_all("a", class_="accordion--text-v2"):
+        raw = clean_text(a_tag.get_text(" ", strip=True))
+        if raw:
+            texts.append(raw)
+
+    # 2) Locate the “Puntuación Veterinaria” div and extract the table if present
+    accordion_div = soup.find(
+        "div",
+        {
+            "class": "text-image--text-wrapper col-12 col-xl-5 order-3 order-xl-2"
+        }
+    )
+    if accordion_div:
+        table = accordion_div.find("table", {"class": "breed-table breed-table-col-2"})
+        if table:
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) >= 2:
+                    key = clean_text(cells[0].get_text(" ", strip=True))
+                    value = clean_text(cells[1].get_text(" ", strip=True))
+                    if key and value:
+                        texts.append(f"{key}: {value}")
+
+    # 3) Extract metadata, alt tags, and define main container
+    metadata = extract_metadata(soup)
+    main = soup.find("main")
+    if not main or len(main.get_text(strip=True)) < 50:
+        main = soup.body
+    alt_tags = extract_alt_tags(main)
+
+    # 4) Remove only scripts, styles, and noscript from main
+    for tag in main.find_all(['script', 'style', 'noscript']):
         tag.decompose()
-    blocos = main.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li'])
-    return [clean_text(tag.get_text(" ", strip=True)) for tag in blocos if tag.get_text(strip=True)], main
 
-def comparar_textos(lista_docx, lista_html):
-    resultados = []
-    vectorizer = TfidfVectorizer(stop_words='english')
+    # 5) Extract h1–h6, p, li, span, div in main, but ignore blocks containing "Previous Next"
+    blocks = main.find_all(['h1','h2','h3','h4','h5','h6','p','li','span','div'])
+    for tag in blocks:
+        raw_text = tag.get_text(" ", strip=True)
+        if "Previous Next" in raw_text or "Anterior Siguiente" in raw_text:
+            continue
+        txt = clean_text(raw_text)
+        if txt:
+            texts.append(txt)
 
-    for texto_doc in lista_docx:
-        melhor_match = ("", 0)
-        for texto_html in lista_html:
-            if texto_doc and texto_html:
-                try:
-                    vects = vectorizer.fit_transform([texto_doc, texto_html])
-                    sim = cosine_similarity(vects[0:1], vects[1:2])[0][0]
-                    if sim > melhor_match[1]:
-                        melhor_match = (texto_html, sim)
-                except:
+    title = soup.title.string.strip() if soup.title else "page"
+    return texts, main, metadata, alt_tags, title
+
+def safe_best_match(query, candidates):
+    """
+    Returns (best_text, similarity) or ("", 0.0).
+    Avoids "empty vocabulary" error when no useful text is found.
+    """
+    query = clean_text(query.lower())
+    candidates_clean = [clean_text(c.lower()) for c in candidates if clean_text(c)]
+    if not query or not candidates_clean:
+        return "", 0.0
+
+    try:
+        vectorizer = TfidfVectorizer(stop_words='english')
+        corpus = [query] + candidates_clean
+        tfidf = vectorizer.fit_transform(corpus)
+        sims = cosine_similarity(tfidf[0:1], tfidf[1:]).flatten()
+        idx_max = sims.argmax()
+        return candidates[idx_max], float(sims[idx_max])
+    except ValueError:
+        return "", 0.0
+
+def compare_texts(docx_list, html_list, metadata, alt_tags):
+    results = []
+
+    for doc_text in docx_list:
+        if not doc_text.strip():
+            continue
+        clean_doc = clean_text(doc_text.strip().lower())
+        ignore_prefixes = [
+            "in dit artikel", "title tag:", "meta description:", "og title:", "og description:",
+            "[alt text da imagem]", "alt tag :", "title tag", "meta description",
+            "open graph title", "open graph description", "-- meta --", "en:", "be-fr:",
+            "guide des races de chiens", "alt-tag:", "-- meta –", "title tag"
+        ]
+        if any(clean_doc.startswith(p) for p in ignore_prefixes):
+            continue
+
+        # "alt-tag" block
+        if clean_doc.startswith("alt-tag"):
+            original_alt = doc_text.split(":", 1)[1].strip()
+            match_text, score = safe_best_match(original_alt, alt_tags)
+            if score >= 0.85:
+                status = "Exact"
+            elif score >= 0.75:
+                status = "Similar"
+            elif score >= 0.4:
+                status = "Partial"
+            else:
+                status = "Missing"
+            results.append({
+                "Document Text": original_alt,
+                "Webpage Match": match_text,
+                "Status": status,
+                "Similarity": round(score * 100, 1)
+            })
+            continue
+
+        # Check exact match in metadata
+        meta_type = next((k for k, v in metadata.items() if v and doc_text.strip() == v.strip()), None)
+        if not meta_type:
+            best_meta = ""
+            best_score = 0.0
+            for k, v in metadata.items():
+                if not v.strip():
                     continue
+                _, sim = safe_best_match(doc_text, [v])
+                if sim > best_score:
+                    best_score = sim
+                    best_meta = k
+            if best_score > 0.85:
+                meta_type = best_meta
 
-        status = "Exact" if melhor_match[1] >= 0.95 else (
-                 "Similar" if melhor_match[1] >= 0.75 else (
-                 "Partial" if melhor_match[1] >= 0.4 else "Missing"))
+        if meta_type:
+            sim_meta = safe_best_match(doc_text, [metadata[meta_type]])[1]
+            if sim_meta >= 0.85:
+                status = "Exact"
+            elif sim_meta >= 0.75:
+                status = "Similar"
+            elif sim_meta >= 0.4:
+                status = "Partial"
+            else:
+                status = "Missing"
+            results.append({
+                "Document Text": doc_text,
+                "Webpage Match": metadata[meta_type],
+                "Status": status,
+                "Similarity": round(sim_meta * 100, 1)
+            })
+            continue
 
-        if texto_doc.lower().startswith("alt-tag") and "chat" in texto_doc.lower():
-            status, melhor_match = "Exact", (texto_doc, 1.0)
-        if texto_doc.startswith("Un écoulement nasal ou oculaire excessif"):
-            status, melhor_match = "Exact", (texto_doc, 1.0)
-
-        resultados.append({
-            "Document Text": texto_doc,
-            "Webpage Match": melhor_match[0],
+        # Otherwise compare against HTML blocks
+        match_html, score_html = "", 0.0
+        if html_list:
+            match_html, score_html = safe_best_match(doc_text, html_list)
+        if score_html >= 0.85:
+            status = "Exact"
+        elif score_html >= 0.75:
+            status = "Similar"
+        elif score_html >= 0.4:
+            status = "Partial"
+        else:
+            status = "Missing"
+        results.append({
+            "Document Text": doc_text,
+            "Webpage Match": match_html,
             "Status": status,
-            "Similarity": round(melhor_match[1]*100, 1)
+            "Similarity": round(score_html * 100, 1)
         })
 
-    return pd.DataFrame(resultados)
+    return pd.DataFrame(results)
 
-def gerar_resumo(df):
+def generate_summary(df):
     total = len(df)
-    resumo = df["Status"].value_counts().reindex(["Exact", "Similar", "Partial", "Missing"], fill_value=0)
-    porcentagens = (resumo / total * 100).round(1)
-
-    resumo_df = pd.DataFrame({
-        "Status": resumo.index,
-        "Quantidade": resumo.values,
-        "Porcentagem": porcentagens.values
+    summary_counts = df["Status"].value_counts().reindex(
+        ["Exact", "Similar", "Partial", "Missing"], fill_value=0
+    )
+    percentages = (summary_counts / total * 100).round(1) if total > 0 else [0, 0, 0, 0]
+    df_summary = pd.DataFrame({
+        "Status": summary_counts.index,
+        "Count": summary_counts.values,
+        "Percentage": percentages.values
     })
-    resumo_df.loc[len(resumo_df.index)] = ["TOTAL", total, "100%"]
-    return resumo_df
+    df_summary.loc[len(df_summary.index)] = ["TOTAL", total, f"{100 if total > 0 else 0}%"]
+    return df_summary
 
-def coletar_elementos_html(main):
-    elementos = []
-
-    for i in range(1, 7):
-        for tag in main.find_all(f'h{i}'):
-            elementos.append(['Heading', f'h{i}', clean_text(tag.get_text(" ", strip=True)), ''])
-
-    for tag in main.find_all(['strong', 'b']):
-        elementos.append(['Bold', '', clean_text(tag.get_text(" ", strip=True)), ''])
-
-    for tag in main.find_all(['em', 'i']):
-        elementos.append(['Italic', '', clean_text(tag.get_text(" ", strip=True)), ''])
-
-    for tag in main.find_all('a', href=True):
-        elementos.append(['Hyperlink', '', clean_text(tag.get_text(" ", strip=True)), tag['href']])
-
-    elementos_df = pd.DataFrame(elementos, columns=['Definição', 'Heading', 'Texto', 'Link'])
-    return elementos_df
-
-def salvar_em_excel(df_comparacao, df_resumo, df_elementos, nome_arquivo="comparacao_resultado.xlsx"):
+def save_to_excel(df_compare, df_summary, df_elements, filename="comparison_result.xlsx"):
     wb = Workbook()
 
-    def estilizar_aba(ws, aplicar_cor_condicional=False):
+    def style_sheet(ws, color=False):
+        # Style header
         for cell in ws[1]:
             cell.font = Font(bold=True)
             cell.fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+        # Adjust column widths
         for col in ws.columns:
-            max_length = max(len(str(cell.value)) if cell.value else 0 for cell in col)
-            ws.column_dimensions[col[0].column_letter].width = max(max_length + 2, 12)
-        
-        if aplicar_cor_condicional:
-            status_col_idx = None
-            for idx, cell in enumerate(ws[1], start=1):
-                if cell.value == "Status":
-                    status_col_idx = idx
-                    break
-
-            if status_col_idx:
+            ws.column_dimensions[col[0].column_letter].width = 25
+        # Color cells by status if color=True
+        if color:
+            color_map = {
+                "Exact": "C6EFCE",
+                "Similar": "FFEB9C",
+                "Partial": "F4B084",
+                "Missing": "F8CBAD"
+            }
+            status_idx = next((i + 1 for i, cell in enumerate(ws[1]) if cell.value == "Status"), None)
+            if status_idx:
                 for row in ws.iter_rows(min_row=2):
-                    status = row[status_col_idx - 1].value
-                    if status == "Exact":
-                        fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-                    elif status == "Similar":
-                        fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
-                    elif status == "Partial":
-                        fill = PatternFill(start_color="F4B084", end_color="F4B084", fill_type="solid")
-                    elif status == "Missing":
-                        fill = PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_type="solid")
-                    else:
-                        fill = None
-                    if fill:
-                        for cell in row:
-                            cell.fill = fill
+                    status = row[status_idx - 1].value
+                    fill_color = color_map.get(status, "FFFFFF")
+                    for cell in row:
+                        cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
 
-    # Aba Comparacao
-    ws1 = wb.active
-    ws1.title = "Comparacao"
-    for row in dataframe_to_rows(df_comparacao, index=False, header=True):
-        ws1.append(row)
-    estilizar_aba(ws1, aplicar_cor_condicional=True)
+    # Sheet 1: Comparison
+    sheet1 = wb.active
+    sheet1.title = "Comparison"
+    for row in dataframe_to_rows(df_compare, index=False, header=True):
+        sheet1.append(row)
+    style_sheet(sheet1, color=True)
 
-    # Aba Resumo
-    ws2 = wb.create_sheet("Resumo")
-    for row in dataframe_to_rows(df_resumo, index=False, header=True):
-        ws2.append(row)
-    estilizar_aba(ws2, aplicar_cor_condicional=True)
+    # Sheet 2: Summary
+    sheet2 = wb.create_sheet("Summary")
+    for row in dataframe_to_rows(df_summary, index=False, header=True):
+        sheet2.append(row)
+    style_sheet(sheet2)
 
-    # Aba Elementos da Página
-    ws3 = wb.create_sheet("Elementos da Página")
-    for row in dataframe_to_rows(df_elementos, index=False, header=True):
-        ws3.append(row)
-    estilizar_aba(ws3)
+    # Sheet 3: Page Elements
+    sheet3 = wb.create_sheet("Page Elements")
+    for row in dataframe_to_rows(df_elements, index=False, header=True):
+        sheet3.append(row)
+    style_sheet(sheet3)
 
-    wb.save(nome_arquivo)
-    print(f"📁 Resultado salvo em: {nome_arquivo}")
+    wb.save(filename)
 
+# ---------------------- INTERFACE ----------------------
 
-if __name__ == "__main__":
-    print("=== COMPARADOR AVANÇADO COM VISUAL ===")
-    caminho_docx = input("📄 Caminho do arquivo .docx: ").strip()
-    url_pagina = input("🌐 URL da página: ").strip()
+def run_comparator():
+    root = Tk()
+    root.title("Document Comparator")
+    root.geometry("450x350")
 
-    if not os.path.isfile(caminho_docx):
-        print("❌ Arquivo .docx não encontrado.")
-        exit()
+    Label(root, text="Choose comparison mode:", font=("Arial", 12)).pack(pady=10)
+    Button(root, text="Single Page", width=30, command=lambda: compare_single(root)).pack(pady=10)
+    Button(root, text="Multiple Pages", width=30, command=lambda: compare_multiple(root)).pack(pady=10)
+    root.mainloop()
+
+def compare_single(root):
+    docx_path = filedialog.askopenfilename(
+        title="Select the .docx file", filetypes=[("Word", "*.docx")]
+    )
+    if not docx_path:
+        return
+    url = simpledialog.askstring("URL", "Enter the corresponding URL:")
+    if not url:
+        return
+    folder = filedialog.askdirectory(title="Select output folder")
+    if not folder:
+        return
 
     try:
-        print("🔄 Carregando e processando...")
-        texto_docx = carregar_texto_docx(caminho_docx)
-        texto_html, main = carregar_texto_url(url_pagina)
-
-        print("✅ Comparando conteúdos...")
-        df_comparacao = comparar_textos(texto_docx, texto_html)
-        df_resumo = gerar_resumo(df_comparacao)
-
-        print("🔎 Coletando elementos da página...")
-        df_elementos = coletar_elementos_html(main)
-
-        salvar_em_excel(df_comparacao, df_resumo, df_elementos)
-
+        docx_txt = load_docx_text(docx_path)
+        html_txt, main, meta, alts, title = load_url_text(url)
+        df1 = compare_texts(docx_txt, html_txt, meta, alts)
+        # Filter out any rows with empty "Document Text" before summary
+        df1 = df1[df1["Document Text"].str.strip() != ""]
+        df2 = generate_summary(df1)
+        df3 = collect_html_elements(main)
+        # Clean up filename
+        safe_title = re.sub(r'[\\/:*?"<>|]', '', title)[:50]
+        output_name = os.path.join(folder, f"comparison_{safe_title}.xlsx")
+        save_to_excel(df1, df2, df3, output_name)
+        messagebox.showinfo("Success", "Comparison completed successfully!")
     except Exception as e:
-        print(f"❌ Erro durante o processo: {e}")
+        messagebox.showerror("Error", str(e))
+
+def compare_multiple(root):
+    count = simpledialog.askinteger("Quantity", "How many pairs do you want to compare?")
+    if not count or count <= 0:
+        return
+    folder = filedialog.askdirectory(title="Select output folder")
+    if not folder:
+        return
+
+    # Progress window
+    progress_window = Tk()
+    progress_window.title("Comparison Progress")
+    progress_window.geometry("400x100")
+
+    Label(progress_window, text=f"Comparing {count} pairs...", font=("Arial", 10)).pack(pady=10)
+    progress = ttk.Progressbar(progress_window, length=350, mode="determinate", maximum=count)
+    progress.pack(pady=5)
+
+    for i in range(count):
+        docx_path = filedialog.askopenfilename(
+            title=f"Document {i+1} (.docx)", filetypes=[("Word", "*.docx")]
+        )
+        if not docx_path:
+            continue
+        url = simpledialog.askstring("URL", f"Enter URL for document {i+1}:")
+        if not url:
+            continue
+
+        try:
+            docx_txt = load_docx_text(docx_path)
+            html_txt, main, meta, alts, title = load_url_text(url)
+            df1 = compare_texts(docx_txt, html_txt, meta, alts)
+            df1 = df1[df1["Document Text"].str.strip() != ""]
+            df2 = generate_summary(df1)
+            df3 = collect_html_elements(main)
+            safe_title = re.sub(r'[\\/:*?"<>|]', '', title)[:50]
+            output_name = os.path.join(folder, f"comparison_{safe_title}.xlsx")
+            save_to_excel(df1, df2, df3, output_name)
+            progress.step(1)
+            progress_window.update_idletasks()
+        except Exception as e:
+            messagebox.showerror("Error", f"Error in {docx_path}: {e}")
+
+    messagebox.showinfo("Success", "Multiple pages process completed successfully!")
+    progress_window.destroy()
+
+if __name__ == "__main__":
+    run_comparator()
